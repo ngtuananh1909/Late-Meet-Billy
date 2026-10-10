@@ -1,6 +1,7 @@
 // OpenAI and ElevenLabs API wrappers for Meeting Copilot
 
 import { getOpenAiApiKey } from "./credentials";
+import { testGatewayConnection, getAiGatewayConfig } from "./aiGateway";
 
 const OPENAI_MODELS_URL = "https://api.openai.com/v1/models";
 const ELEVENLABS_USER_URL = "https://api.elevenlabs.io/v1/user";
@@ -122,6 +123,20 @@ export async function getApiKey(): Promise<string | null> {
  */
 export async function validateOpenAIKey(apiKey: string): Promise<boolean> {
   if (!apiKey) return false;
+  try {
+    const cfg = await getAiGatewayConfig();
+    if (cfg.baseURL && !cfg.baseURL.includes("api.openai.com")) {
+      const res = await testGatewayConnection({
+        baseURL: cfg.baseURL,
+        apiKey: apiKey || cfg.apiKey || "",
+        modelName: cfg.modelName || "gpt-4o-mini",
+      });
+      return res.success;
+    }
+  } catch {
+    // Fall back to direct OpenAI validation
+  }
+
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 5000);
 

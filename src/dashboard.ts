@@ -6,6 +6,7 @@ import {
   Decision,
   ActionItem,
   KeyInsight,
+  ExportArtifactsInfo,
 } from "./types";
 import { initTheme } from "./theme.js";
 import { resolveManualMeetTab } from "./meetingTabs";
@@ -13,6 +14,7 @@ import { startDashboardAudioCapture } from "./dashboardCapture";
 import { escapeHtml, formatDuration, sanitizeTopicStatus } from "./utils/domHelpers";
 import { sanitizeDataAttr } from "./utils/sanitize";
 import { renderApiUsageDashboard } from "./apiUsageDashboard";
+import { getAiGatewayConfig, saveAiGatewayConfig, testGatewayConnection } from "./utils/aiGateway";
 
 const UI_TRUNCATION_MAX = 50;
 
@@ -315,12 +317,113 @@ document.addEventListener("DOMContentLoaded", async () => {
   // ——— State Management ———
   let lastState: State | null = null;
 
+  // ——— Render Artifacts Card ———
+  function renderArtifactsCard(artifacts: ExportArtifactsInfo) {
+    const card = document.getElementById("dash-artifacts-card");
+    if (!card) return;
+    card.style.display = "block";
+
+    const timeEl = document.getElementById("artifacts-timestamp");
+    if (timeEl && artifacts.generatedAt) {
+      timeEl.textContent = new Date(artifacts.generatedAt).toLocaleTimeString();
+    }
+
+    // 1. Transcript
+    const transNameEl = document.getElementById("artifact-transcript-name");
+    if (transNameEl) transNameEl.textContent = artifacts.transcriptFilename || "Transcript.md";
+    const transDl = document.getElementById(
+      "artifact-transcript-download",
+    ) as HTMLAnchorElement | null;
+    if (transDl && artifacts.transcriptUrl) {
+      transDl.href = artifacts.transcriptUrl;
+      transDl.download = artifacts.transcriptFilename || "Transcript.md";
+    }
+    const transCopy = document.getElementById("artifact-transcript-copy");
+    if (transCopy && artifacts.transcriptUrl) {
+      transCopy.onclick = async () => {
+        try {
+          const resp = await fetch(artifacts.transcriptUrl!);
+          const text = await resp.text();
+          await navigator.clipboard.writeText(text);
+          transCopy.textContent = "✅ Copied";
+          setTimeout(() => {
+            transCopy.textContent = "📋 Copy";
+          }, 2000);
+        } catch (err) {
+          console.error("Failed to copy transcript:", err);
+        }
+      };
+    }
+
+    // 2. Video
+    const videoBox = document.getElementById("artifact-video-box");
+    const videoNameEl = document.getElementById("artifact-video-name");
+    const videoDl = document.getElementById("artifact-video-download") as HTMLAnchorElement | null;
+    if (artifacts.recordingUrl) {
+      if (videoBox) videoBox.style.display = "block";
+      if (videoNameEl) {
+        videoNameEl.textContent = `${artifacts.recordingFilename || "Recording.webm"}${
+          artifacts.recordingSizeMb ? ` (${artifacts.recordingSizeMb} MB)` : ""
+        }`;
+      }
+      if (videoDl) {
+        videoDl.href = artifacts.recordingUrl;
+        videoDl.download = artifacts.recordingFilename || "Recording.webm";
+      }
+    } else {
+      if (videoBox) videoBox.style.display = "none";
+    }
+
+    // 3. Master MoM
+    const momNameEl = document.getElementById("artifact-mom-name");
+    if (momNameEl) momNameEl.textContent = artifacts.momFilename || "MoM.md";
+    const momDl = document.getElementById("artifact-mom-download") as HTMLAnchorElement | null;
+    if (momDl && artifacts.momUrl) {
+      momDl.href = artifacts.momUrl;
+      momDl.download = artifacts.momFilename || "MoM.md";
+    }
+    const momCopy = document.getElementById("artifact-mom-copy");
+    if (momCopy && artifacts.momMarkdown) {
+      momCopy.onclick = async () => {
+        try {
+          await navigator.clipboard.writeText(artifacts.momMarkdown!);
+          momCopy.textContent = "✅ Copied";
+          setTimeout(() => {
+            momCopy.textContent = "📋 Copy";
+          }, 2000);
+        } catch (err) {
+          console.error("Failed to copy MoM:", err);
+        }
+      };
+    }
+
+    // 4. MoM Preview
+    const momPreview = document.getElementById("artifact-mom-preview");
+    if (momPreview) {
+      momPreview.textContent = artifacts.momMarkdown || "No MoM content generated.";
+    }
+  }
+
   // ——— Initial State ———
   try {
     lastState = await chrome.runtime.sendMessage({ type: "GET_STATE" });
-    if (lastState) updateDashboard(lastState);
+    if (lastState) {
+      updateDashboard(lastState);
+      if (lastState.artifacts) {
+        renderArtifactsCard(lastState.artifacts);
+      }
+    }
   } catch {
     /* no meeting data yet */
+  }
+
+  try {
+    const stored = await chrome.storage.local.get("lastExportedArtifacts");
+    if (stored.lastExportedArtifacts) {
+      renderArtifactsCard(stored.lastExportedArtifacts);
+    }
+  } catch {
+    /* storage error */
   }
 
   // ——— Listen for State Updates ———
@@ -328,6 +431,9 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (message.type === "STATE_UPDATE") {
       lastState = message.state;
       updateDashboard(message.state);
+      if (message.state?.artifacts) {
+        renderArtifactsCard(message.state.artifacts);
+      }
       if (!message.state?.audioActive) {
         smoothed = new Array(WAVEFORM_N).fill(0);
         drawIdleWaveform();
@@ -341,6 +447,9 @@ document.addEventListener("DOMContentLoaded", async () => {
       // Dynamic load requested by human reviewer
       loadMeetingHistory();
       loadedTabs.delete("sessions");
+      if (message.artifacts) {
+        renderArtifactsCard(message.artifacts);
+      }
     }
     if (message.type === "WAVEFORM_DATA" && Array.isArray(message.buckets)) {
       drawWaveform(message.buckets);
@@ -349,6 +458,98 @@ document.addEventListener("DOMContentLoaded", async () => {
         waveformStatusEl.classList.add("active");
       }
     }
+  });
+
+  // ——— Quick AI Gateway Settings Modal Wiring ———
+  const aiSettingsBtn = document.getElementById("dash-ai-settings-btn");
+  const aiSettingsModal = document.getElementById("ai-settings-modal");
+  const closeAiSettingsModalBtn = document.getElementById("close-ai-settings-modal-btn");
+  const modalOpenOptionsPage = document.getElementById("modal-open-options-page");
+  const modalBaseUrlInput = document.getElementById(
+    "modal-gateway-base-url",
+  ) as HTMLInputElement | null;
+  const modalApiKeyInput = document.getElementById(
+    "modal-gateway-api-key",
+  ) as HTMLInputElement | null;
+  const modalModelInput = document.getElementById("modal-gateway-model") as HTMLInputElement | null;
+  const modalLangSelect = document.getElementById(
+    "modal-gateway-language",
+  ) as HTMLSelectElement | null;
+  const modalTestBtn = document.getElementById(
+    "modal-gateway-test-btn",
+  ) as HTMLButtonElement | null;
+  const modalSaveBtn = document.getElementById(
+    "modal-gateway-save-btn",
+  ) as HTMLButtonElement | null;
+  const modalStatusEl = document.getElementById("modal-gateway-status");
+
+  async function populateAiGatewayModal() {
+    try {
+      const config = await getAiGatewayConfig();
+      if (modalBaseUrlInput) modalBaseUrlInput.value = config.baseURL || "";
+      if (modalApiKeyInput) modalApiKeyInput.value = config.apiKey || "";
+      if (modalModelInput) modalModelInput.value = config.modelName || "";
+      if (modalLangSelect) modalLangSelect.value = config.language || "auto";
+      if (modalStatusEl) modalStatusEl.textContent = "";
+    } catch (err) {
+      console.warn("[Dashboard] Failed to load gateway config:", err);
+    }
+  }
+
+  aiSettingsBtn?.addEventListener("click", async () => {
+    await populateAiGatewayModal();
+    aiSettingsModal?.classList.remove("hidden");
+  });
+
+  closeAiSettingsModalBtn?.addEventListener("click", () => {
+    aiSettingsModal?.classList.add("hidden");
+  });
+
+  modalOpenOptionsPage?.addEventListener("click", (e) => {
+    e.preventDefault();
+    if (chrome.runtime.openOptionsPage) {
+      chrome.runtime.openOptionsPage();
+    } else {
+      window.open(chrome.runtime.getURL("options.html"));
+    }
+  });
+
+  modalTestBtn?.addEventListener("click", async () => {
+    if (!modalTestBtn || !modalStatusEl) return;
+    modalTestBtn.disabled = true;
+    modalStatusEl.textContent = "Testing connection...";
+    modalStatusEl.style.color = "var(--text-sub)";
+    const res = await testGatewayConnection({
+      baseURL: modalBaseUrlInput?.value || "",
+      apiKey: modalApiKeyInput?.value || "",
+      modelName: modalModelInput?.value || "gpt-4o-mini",
+    });
+    modalTestBtn.disabled = false;
+    if (res.success) {
+      modalStatusEl.textContent = `✅ Connected (${res.latencyMs}ms, model: ${res.modelUsed})`;
+      modalStatusEl.style.color = "#22c55e";
+    } else {
+      modalStatusEl.textContent = `❌ ${res.error || "Connection failed"}`;
+      modalStatusEl.style.color = "#ef4444";
+    }
+  });
+
+  modalSaveBtn?.addEventListener("click", async () => {
+    if (!modalSaveBtn || !modalStatusEl) return;
+    modalSaveBtn.disabled = true;
+    const selectedLang = modalLangSelect?.value as "auto" | "vi" | "en" | undefined;
+    await saveAiGatewayConfig({
+      baseURL: modalBaseUrlInput?.value || "",
+      apiKey: modalApiKeyInput?.value || "",
+      modelName: modalModelInput?.value || "gpt-4o-mini",
+      language: selectedLang || "auto",
+    });
+    modalSaveBtn.disabled = false;
+    modalStatusEl.textContent = "✅ Settings saved successfully!";
+    modalStatusEl.style.color = "#22c55e";
+    setTimeout(() => {
+      aiSettingsModal?.classList.add("hidden");
+    }, 800);
   });
 
   // ——— Start Audio Capture (User Gesture via tabCapture) ———
@@ -382,11 +583,16 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (lastState?.audioActive) {
       try {
         audioBtn.disabled = true;
-        await chrome.runtime.sendMessage({ type: "MANUAL_STOP_AUDIO" });
+        audioBtn.textContent = "Ending & Generating MoM...";
+        const response = await chrome.runtime.sendMessage({ type: "MANUAL_STOP_AUDIO" });
+        if (response?.artifacts) {
+          renderArtifactsCard(response.artifacts);
+        }
       } catch (err) {
-        console.error("[Dashboard] Failed to stop audio:", err);
+        console.error("[Dashboard] Failed to stop meeting:", err);
       } finally {
         audioBtn.disabled = false;
+        setAudioBtnActive(false);
       }
       return;
     }
@@ -424,15 +630,14 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     function handleDashboardAudioError(err: unknown) {
       const e = err as Error;
-      console.error("[Dashboard] Failed to start audio:", e);
+      console.error("[Dashboard] Failed to start meeting:", e);
       if (audioBtn) {
         audioBtn.disabled = false;
         audioBtn.textContent =
           (e.message || String(e)).length > 30 ? "Error — Retry" : e.message || "Error";
         setTimeout(() => {
           if (audioBtn) {
-            audioBtn.innerHTML =
-              '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon" style="margin-right: 6px;"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2"></path><line x1="12" x2="12" y1="19" y2="22"></line></svg> Start Audio';
+            setAudioBtnActive(false);
           }
         }, 3000);
       }
@@ -445,12 +650,12 @@ document.addEventListener("DOMContentLoaded", async () => {
       audioBtn.classList.add("active");
       audioBtn.disabled = false;
       audioBtn.innerHTML =
-        '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon" style="margin-right: 6px;"><rect width="18" height="18" x="3" y="3" rx="2"></rect><path d="M9 12h6"></path></svg> Stop Audio';
+        '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon" style="margin-right: 6px;"><rect width="18" height="18" x="3" y="3" rx="2"></rect><path d="M9 12h6"></path></svg> End Meeting';
     } else {
       audioBtn.classList.remove("active");
       audioBtn.disabled = false;
       audioBtn.innerHTML =
-        '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon" style="margin-right: 6px;"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2"></path><line x1="12" x2="12" y1="19" y2="22"></line></svg> Start Audio';
+        '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon" style="margin-right: 6px;"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg> Start Meeting';
     }
   }
 
@@ -472,19 +677,42 @@ document.addEventListener("DOMContentLoaded", async () => {
     // Status
     const statusDot = document.querySelector(".dash-status-dot");
     const statusText = document.getElementById("dash-status-text");
+    const captionBadge = document.getElementById("dash-caption-source");
+
     if (state.isActive) {
       if (statusDot) statusDot.classList.add("active");
       if (statusText) statusText.textContent = `Meeting active — ${state.meetingId || "unknown"}`;
       if (state.startTime) startTimer(state.startTime);
       setAudioBtnActive(state.audioActive || false);
+
+      if (captionBadge) {
+        if (state.captionSource === "dom") {
+          captionBadge.style.display = "inline-flex";
+          captionBadge.className = "caption-source-badge badge-dom";
+          captionBadge.textContent = "🟢 DOM Captions";
+          captionBadge.title = "Direct Google Meet captions (Zero API cost)";
+        } else if (state.captionSource === "audio_stt") {
+          captionBadge.style.display = "inline-flex";
+          captionBadge.className = "caption-source-badge badge-stt";
+          captionBadge.textContent = "🟡 Audio STT";
+          captionBadge.title = "Transcribing via speech-to-text fallback";
+        } else {
+          captionBadge.style.display = "none";
+        }
+      }
     } else {
       if (statusDot) statusDot.classList.remove("active");
       if (statusText) statusText.textContent = "No active meeting";
+      if (captionBadge) captionBadge.style.display = "none";
       setAudioBtnActive(false);
       if (timerInterval) {
         window.clearInterval(timerInterval);
         timerInterval = null;
       }
+    }
+
+    if (state.artifacts) {
+      renderArtifactsCard(state.artifacts);
     }
 
     // Summary

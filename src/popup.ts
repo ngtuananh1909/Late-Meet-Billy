@@ -1,13 +1,7 @@
 import { State } from "./types";
 import { initTheme } from "./theme.js";
-import {
-  getApiCredentials,
-  saveApiCredentials,
-  unlockCredentials,
-  isUnlocked,
-} from "./utils/credentials";
+import { getAiGatewayConfig, saveAiGatewayConfig, testGatewayConnection } from "./utils/aiGateway";
 import { escapeHtml, formatDuration, sanitizeTopicStatus } from "./utils/domHelpers";
-import { validateOpenAIKey } from "./utils/api.js";
 import { resolveManualMeetTab } from "./meetingTabs";
 import { startPopupAudioCapture } from "./popupCapture";
 
@@ -27,140 +21,130 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   let lastState: State | null = null;
 
-  // ——— Passphrase management ———
-  const passphraseInput = document.getElementById("passphrase-input") as HTMLInputElement | null;
-  const passphraseStatus = document.getElementById("passphrase-status");
-  let pendingUnlock: Promise<boolean> | null = null;
+  // ——— AI Gateway Setup Management ———
+  const baseUrlInput = document.getElementById("gateway-base-url") as HTMLInputElement | null;
+  const apiKeyInput = document.getElementById("api-key-input") as HTMLInputElement | null;
+  const modelInput = document.getElementById("gateway-model-input") as HTMLInputElement | null;
+  const langSelect = document.getElementById("gateway-lang-select") as HTMLSelectElement | null;
+  const testStatus = document.getElementById("gateway-test-status") as HTMLDivElement | null;
+  const testBtn = document.getElementById("test-gateway-btn") as HTMLButtonElement | null;
+  const saveBtn = document.getElementById("save-keys") as HTMLButtonElement | null;
 
-  function updatePassphraseStatus() {
-    if (!passphraseStatus) return;
-    if (isUnlocked()) {
-      passphraseStatus.className = "status-text status-success";
-      passphraseStatus.textContent = "Unlocked — encryption key is active";
-    } else {
-      passphraseStatus.className = "status-text status-danger";
-      passphraseStatus.textContent = "Locked — enter passphrase to unlock encryption";
-    }
-  }
+  // Load gateway config
+  const gatewayConfig = await getAiGatewayConfig();
+  if (baseUrlInput) baseUrlInput.value = gatewayConfig.baseURL || "http://localhost:4981/openai/v1";
+  if (apiKeyInput) apiKeyInput.value = gatewayConfig.apiKey || "";
+  if (modelInput) modelInput.value = gatewayConfig.modelName || "gemini-3.6-flash";
+  if (langSelect) langSelect.value = gatewayConfig.language || "auto";
 
-  async function handlePassphraseUnlock(): Promise<boolean> {
-    if (isUnlocked()) return true;
-    const passphrase = passphraseInput?.value ?? "";
-    if (!passphrase) {
-      if (passphraseStatus) passphraseStatus.textContent = "Please enter a passphrase";
-      return false;
-    }
-    const success = await unlockCredentials(passphrase);
-    if (success) {
-      updatePassphraseStatus();
-      const creds = await getApiCredentials();
-      if (creds.openai_api_key || creds.elevenlabs_api_key) {
-        setupView.style.display = "none";
-        mainView.style.display = "block";
-      }
-      return true;
-    }
-    if (passphraseStatus) {
-      passphraseStatus.className = "status-text status-danger";
-      passphraseStatus.textContent = "Wrong passphrase — could not decrypt stored credentials";
-    }
-    return false;
-  }
+  // Check if gateway is ready (has baseURL and either apiKey or is local proxy)
+  const isGatewayReady = Boolean(
+    gatewayConfig.baseURL &&
+    (gatewayConfig.apiKey ||
+      gatewayConfig.baseURL.includes("localhost") ||
+      gatewayConfig.baseURL.includes("127.0.0.1") ||
+      gatewayConfig.baseURL.includes("0.0.0.0")),
+  );
 
-  passphraseInput?.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") pendingUnlock = handlePassphraseUnlock();
-  });
-  passphraseInput?.addEventListener("blur", () => {
-    pendingUnlock = handlePassphraseUnlock();
-  });
-
-  // ——— Check if API key is configured ———
-  const config = await getApiCredentials();
-
-  if (!config.openai_api_key && !config.elevenlabs_api_key) {
-    setupView.style.display = "block";
-    mainView.style.display = "none";
-  } else {
+  if (isGatewayReady) {
     setupView.style.display = "none";
     mainView.style.display = "block";
+  } else {
+    setupView.style.display = "block";
+    mainView.style.display = "none";
   }
 
   void maybeStartPopupTour();
 
-  updatePassphraseStatus();
+  // Test gateway connection
+  testBtn?.addEventListener("click", async () => {
+    if (!testStatus) return;
+    testStatus.className = "status-text";
+    testStatus.style.color = "var(--text-sub, #a1a1aa)";
+    testStatus.textContent = "⚡ Testing connection to gateway...";
+    testBtn.disabled = true;
 
-  // ——— Setup: Save Key ———
-  document.getElementById("save-keys")?.addEventListener("click", async () => {
-    const apiKeyInput = document.getElementById("api-key-input") as HTMLInputElement;
-    const apiKey = apiKeyInput.value.trim();
-    const saveBtn = document.getElementById("save-keys") as HTMLButtonElement;
+    const result = await testGatewayConnection({
+      baseURL: baseUrlInput?.value.trim() || undefined,
+      apiKey: apiKeyInput?.value.trim() || undefined,
+      modelName: modelInput?.value.trim() || undefined,
+    });
 
-    if (!isUnlocked()) {
-      if (pendingUnlock) await pendingUnlock;
-      if (!isUnlocked()) {
-        const unlocked = await handlePassphraseUnlock();
-        if (!unlocked) return;
-      }
+    testBtn.disabled = false;
+    if (result.success) {
+      testStatus.style.color = "#10b981";
+      testStatus.textContent = `✅ Connected! Model: ${result.modelUsed} (${result.latencyMs}ms)`;
+    } else {
+      testStatus.style.color = "#ef4444";
+      testStatus.textContent = `❌ ${result.error || "Connection failed"}`;
     }
+  });
 
-    if (!apiKey) {
-      shakeElement(apiKeyInput);
+  // Save gateway config
+  saveBtn?.addEventListener("click", async () => {
+    const baseURL = baseUrlInput?.value.trim() || "http://localhost:4981/openai/v1";
+    const apiKey = apiKeyInput?.value.trim() || "";
+    const modelName = modelInput?.value.trim() || "gemini-3.6-flash";
+    const language = (langSelect?.value as any) || "auto";
+
+    if (!baseURL) {
+      shakeElement(baseUrlInput);
       return;
     }
-    //Validation.
-    const originalText = "Save Key";
+
     saveBtn.disabled = true;
-    saveBtn.textContent = "Validating...";
+    saveBtn.textContent = "Saving...";
 
-    const isValid = await validateOpenAIKey(apiKey);
-    if (!isValid) {
-      saveBtn.disabled = false;
-      saveBtn.textContent = originalText;
-      shakeElement(apiKeyInput);
-      //Helpful error message.
-      let errorEl = document.getElementById("api-key-error");
-      if (!errorEl) {
-        errorEl = document.createElement("div");
-        errorEl.id = "api-key-error";
-        errorEl.className = "status-text status-danger";
-        errorEl.style.fontSize = "11px";
-        errorEl.style.marginTop = "6px";
-        errorEl.style.textAlign = "left";
-        apiKeyInput.parentNode?.appendChild(errorEl);
-      }
-      errorEl.textContent = "Invalid API Key. Please verify and try again.";
-      return;
-    }
-    //Cleaning up.
-    const errorEl = document.getElementById("api-key-error");
-    if (errorEl) {
-      errorEl.remove();
-    }
+    await saveAiGatewayConfig({
+      baseURL,
+      apiKey,
+      modelName,
+      language,
+    });
 
-    // Since the popup only has one input currently, we'll save it as openai_api_key
-    // Users can configure ElevenLabs in the options page.
+    saveBtn.disabled = false;
+    saveBtn.innerHTML = `<span>Save & Continue</span><span class="btn-icon">→</span>`;
 
-    await saveApiCredentials({ openai_api_key: apiKey });
     setupView.style.display = "none";
     mainView.style.display = "block";
     void maybeStartPopupTour();
   });
 
-  // ——— Toggle API Key Visibility ———
+  // Toggle API Key visibility
   document.getElementById("toggle-key")?.addEventListener("click", () => {
-    const input = document.getElementById("api-key-input") as HTMLInputElement;
-    input.type = input.type === "password" ? "text" : "password";
+    if (apiKeyInput) {
+      apiKeyInput.type = apiKeyInput.type === "password" ? "text" : "password";
+    }
   });
 
-  // ——— Settings ———
+  // Full options page link
+  document.getElementById("popup-open-options-link")?.addEventListener("click", (e) => {
+    e.preventDefault();
+    chrome.runtime.openOptionsPage();
+  });
+
+  // Settings button
   document.getElementById("settings-btn")?.addEventListener("click", () => {
     chrome.runtime.openOptionsPage();
   });
 
-  // ——— Open Dashboard ———
-  document.getElementById("open-dashboard")?.addEventListener("click", () => {
-    chrome.sidePanel.open({ windowId: chrome.windows.WINDOW_ID_CURRENT });
-  });
+  // Open Side Panel buttons
+  const openSidePanel = async () => {
+    try {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (tab?.id) {
+        await chrome.sidePanel.open({ tabId: tab.id });
+      } else {
+        await chrome.sidePanel.open({ windowId: chrome.windows.WINDOW_ID_CURRENT });
+      }
+      window.close();
+    } catch {
+      chrome.sidePanel.open({ windowId: chrome.windows.WINDOW_ID_CURRENT }).catch(() => {});
+    }
+  };
+
+  document.getElementById("open-sidepanel-btn")?.addEventListener("click", openSidePanel);
+  document.getElementById("open-dashboard")?.addEventListener("click", openSidePanel);
 
   // ——— Start Copilot (Audio Capture with User Gesture) ———
   const copilotBtn = document.getElementById("start-copilot-btn") as HTMLButtonElement | null;
@@ -284,12 +268,12 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   async function handleStartAudio(btn: HTMLButtonElement) {
     const textEl = btn.querySelector(".copilot-btn-text");
-    const originalText = textEl?.textContent || "Start";
+    const originalText = textEl?.textContent || "Start Meeting";
 
-    // --- Pre-flight Check for API Keys ---
-    const keys = await getApiCredentials();
-    if (!keys.openai_api_key) {
-      alert("Please configure your OpenAI API Key in the Settings before starting.");
+    // --- Pre-flight Check for AI Gateway ---
+    const gateway = await getAiGatewayConfig();
+    if (!gateway.baseURL) {
+      alert("Please configure your AI Gateway settings before starting.");
       chrome.runtime.openOptionsPage();
       return;
     }
@@ -298,19 +282,6 @@ document.addEventListener("DOMContentLoaded", async () => {
       console.log("[LateMeet] Audio already active, skipping capture request.");
       return;
     }
-
-    // Check if ElevenLabs API key exists before starting
-    const creds = await getApiCredentials();
-    if (!creds.elevenlabs_api_key) {
-      if (textEl) {
-        textEl.textContent = "⚠️ Missing ElevenLabs Key";
-        setTimeout(() => {
-          if (textEl) textEl.textContent = originalText;
-        }, 2000);
-      }
-      return; // Stop here - don't start recording
-    }
-    // ========== END OF ADDED CODE ==========
 
     try {
       // Show loading state
@@ -374,7 +345,14 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   }
 
-  copilotBtn?.addEventListener("click", () => handleStartAudio(copilotBtn));
+  copilotBtn?.addEventListener("click", () => {
+    if (lastState?.audioActive) {
+      handleStopAudio(copilotBtn);
+      return;
+    }
+    handleStartAudio(copilotBtn);
+  });
+
   document.getElementById("meeting-start-audio-btn")?.addEventListener("click", (e) => {
     const btn = e.currentTarget as HTMLButtonElement | null;
     if (!btn) return;
@@ -403,31 +381,37 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (active) {
       copilotBtn.classList.remove("loading");
       copilotBtn.classList.add("active");
-      if (textEl) textEl.textContent = "Recording...";
-      if (iconEl)
+      if (textEl) textEl.textContent = "End Meeting";
+      if (iconEl) {
         iconEl.innerHTML =
-          '<svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>';
-      copilotBtn.disabled = true;
+          '<svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 24 24" fill="currentColor"><rect x="5" y="5" width="14" height="14" rx="2"/></svg>';
+      }
+      copilotBtn.disabled = false;
+      copilotBtn.title = "End Meeting & Generate MoM";
+
       if (miniBtn) {
         miniBtn.style.display = "flex";
         miniBtn.classList.add("active");
-        miniBtn.title = "Stop audio capture";
+        miniBtn.title = "End Meeting & Generate MoM";
         const labelNode = getMiniBtnLabelNode();
-        if (labelNode) labelNode.textContent = " Stop Audio";
+        if (labelNode) labelNode.textContent = " End Meeting";
       }
     } else {
       copilotBtn.classList.remove("active");
-      if (textEl) textEl.textContent = "Start Copilot";
-      if (iconEl)
+      if (textEl) textEl.textContent = "Start Meeting";
+      if (iconEl) {
         iconEl.innerHTML =
-          '<svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/></svg>';
+          '<svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>';
+      }
       copilotBtn.disabled = false;
+      copilotBtn.title = "Start Meeting";
+
       if (miniBtn) {
         miniBtn.style.display = "flex";
         miniBtn.classList.remove("active");
-        miniBtn.title = "Start audio capture";
+        miniBtn.title = "Start Meeting";
         const labelNode = getMiniBtnLabelNode();
-        if (labelNode) labelNode.textContent = " Start Audio";
+        if (labelNode) labelNode.textContent = " Start Meeting";
       }
     }
   }

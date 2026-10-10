@@ -4,6 +4,12 @@ import {
   type ParticipantNameCandidate,
 } from "./participantDetection.ts";
 
+import {
+  startCaptionObserver,
+  stopCaptionObserver,
+  isMeetCaptionsEnabled,
+  ensureMeetCaptionsActive,
+} from "./meetCaptions";
 import { initTheme } from "./theme.js";
 
 void initTheme().catch((err) => console.error(err));
@@ -707,6 +713,29 @@ void initTheme().catch((err) => console.error(err));
       return true;
     }
 
+    if (message?.type === "START_CAPTION_OBSERVER") {
+      startCaptionObserver(undefined, message.startTime);
+      sendResponse({ success: true, captionsActive: isMeetCaptionsEnabled() });
+      return false;
+    }
+
+    if (message?.type === "STOP_CAPTION_OBSERVER") {
+      stopCaptionObserver();
+      sendResponse({ success: true });
+      return false;
+    }
+
+    if (message?.type === "ENSURE_CAPTIONS_ACTIVE") {
+      const active = ensureMeetCaptionsActive();
+      sendResponse({ success: true, captionsActive: active });
+      return false;
+    }
+
+    if (message?.type === "GET_CAPTION_STATUS") {
+      sendResponse({ captionsActive: isMeetCaptionsEnabled() });
+      return false;
+    }
+
     if (message?.type === "STATE_UPDATE") {
       const btn = document.getElementById("mc-float-btn") as HTMLButtonElement | null;
       const isActive = message.state?.isActive;
@@ -724,10 +753,12 @@ void initTheme().catch((err) => console.error(err));
       if (!isActive) {
         stopParticipantPolling();
         stopActiveSpeakerDetection();
+        stopCaptionObserver();
       } else {
         // Restart polling/detection if a new session begins
         startParticipantPolling();
         startActiveSpeakerDetection();
+        startCaptionObserver(undefined, message.state?.startTime);
       }
 
       sendResponse({ success: true });

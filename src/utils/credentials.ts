@@ -351,7 +351,18 @@ export async function getApiCredentials(): Promise<ApiCredentials> {
  */
 export async function getOpenAiApiKey(): Promise<string | null> {
   const credentials = await getApiCredentials();
-  return credentials.openai_api_key || null;
+  if (credentials.openai_api_key) return credentials.openai_api_key;
+  try {
+    const gw = (await chrome.storage.local.get("aiGatewayConfig")) as {
+      aiGatewayConfig?: { apiKey?: string };
+    };
+    if (gw?.aiGatewayConfig?.apiKey) {
+      return gw.aiGatewayConfig.apiKey;
+    }
+  } catch {
+    // Ignore storage lookup error
+  }
+  return null;
 }
 
 /**

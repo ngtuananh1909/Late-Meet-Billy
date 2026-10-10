@@ -5,11 +5,12 @@ import {
   isUnlocked,
   isVaultInitialized,
 } from "./utils/credentials";
-import { validateOpenAIKey, validateElevenLabsKey } from "./utils/api.js";
+import { validateElevenLabsKey } from "./utils/api.js";
 import { renderStorageDashboard } from "./storageDashboard";
 import { renderApiUsageDashboard } from "./apiUsageDashboard";
 import { MIN_PASSPHRASE_LENGTH, evaluatePassphraseStrength } from "./passphraseStrength";
 import { getSettings } from "./settings";
+import { getAiGatewayConfig, saveAiGatewayConfig, testGatewayConnection } from "./utils/aiGateway";
 
 /**
  * Strongly-typed map of all recognized extension settings keys and their
@@ -91,10 +92,50 @@ document.addEventListener("DOMContentLoaded", async () => {
     });
   }
 
-  const openaiKeyInput = document.getElementById("openai-key") as HTMLInputElement | null;
-  if (openaiKeyInput && credentials.openai_api_key) {
-    openaiKeyInput.value = credentials.openai_api_key;
-  }
+  // ——— Custom AI Gateway Setup ———
+  const gatewayConfig = await getAiGatewayConfig();
+  const baseUrlInput = document.getElementById("ai-base-url") as HTMLInputElement | null;
+  const apiKeyInput = document.getElementById("ai-api-key") as HTMLInputElement | null;
+  const modelNameInput = document.getElementById("ai-model-name") as HTMLInputElement | null;
+  const languageSelect = document.getElementById("ai-language") as HTMLSelectElement | null;
+  const testGatewayBtn = document.getElementById("btn-test-gateway") as HTMLButtonElement | null;
+  const gatewayStatus = document.getElementById("gateway-test-status") as HTMLSpanElement | null;
+
+  if (baseUrlInput) baseUrlInput.value = gatewayConfig.baseURL;
+  if (apiKeyInput) apiKeyInput.value = gatewayConfig.apiKey;
+  if (modelNameInput) modelNameInput.value = gatewayConfig.modelName;
+  if (languageSelect) languageSelect.value = gatewayConfig.language || "auto";
+
+  testGatewayBtn?.addEventListener("click", async () => {
+    if (!testGatewayBtn) return;
+    const originalHtml = testGatewayBtn.innerHTML;
+    testGatewayBtn.disabled = true;
+    testGatewayBtn.textContent = "Testing...";
+    if (gatewayStatus) {
+      gatewayStatus.textContent = "Connecting to endpoint...";
+      gatewayStatus.style.color = "";
+    }
+
+    const result = await testGatewayConnection({
+      baseURL: baseUrlInput?.value || "",
+      apiKey: apiKeyInput?.value || "",
+      modelName: modelNameInput?.value || "",
+      language: (languageSelect?.value as any) || "auto",
+    });
+
+    testGatewayBtn.disabled = false;
+    testGatewayBtn.innerHTML = originalHtml;
+
+    if (gatewayStatus) {
+      if (result.success) {
+        gatewayStatus.style.color = "var(--accent-color, #22c55e)";
+        gatewayStatus.textContent = `Connected! Latency: ${result.latencyMs}ms (Model: ${result.modelUsed})`;
+      } else {
+        gatewayStatus.style.color = "#ef4444";
+        gatewayStatus.textContent = `Failed: ${result.error || "Unknown error"}`;
+      }
+    }
+  });
 
   const elevenlabsKeyInput = document.getElementById("elevenlabs-key") as HTMLInputElement | null;
   if (elevenlabsKeyInput && credentials.elevenlabs_api_key) {
@@ -296,8 +337,8 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   async function applyUnlockedCredentials() {
     const creds = await getApiCredentials();
-    if (openaiKeyInput && creds.openai_api_key) {
-      openaiKeyInput.value = creds.openai_api_key;
+    if (apiKeyInput && !apiKeyInput.value && creds.openai_api_key) {
+      apiKeyInput.value = creds.openai_api_key;
     }
     if (elevenlabsKeyInput && creds.elevenlabs_api_key) {
       elevenlabsKeyInput.value = creds.elevenlabs_api_key;
@@ -356,11 +397,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     const saveBtn = document.getElementById("save-btn") as HTMLButtonElement;
     const status = document.getElementById("save-status");
 
-    const openaiKey =
-      (document.getElementById("openai-key") as HTMLInputElement | null)?.value.trim() ?? "";
-    const elevenlabsKey =
-      (document.getElementById("elevenlabs-key") as HTMLInputElement | null)?.value.trim() ?? "";
-
     const originalText = saveBtn.textContent?.trim() || "Save Settings";
     saveBtn.disabled = true;
     try {
@@ -404,21 +440,25 @@ document.addEventListener("DOMContentLoaded", async () => {
 
       await chrome.storage.local.set({ settings: newSettings });
 
-      let credentialsSaved = false;
-      if (pendingUnlock) await pendingUnlock;
-      if (isUnlocked()) {
-        saveBtn.textContent = "Validating Keys...";
-        const [isOpenAIValid, isElevenLabsValid] = await Promise.all([
-          openaiKey ? validateOpenAIKey(openaiKey) : Promise.resolve(true),
-          elevenlabsKey ? validateElevenLabsKey(elevenlabsKey) : Promise.resolve(true),
-        ]);
+      // Save Custom AI Gateway configuration directly
+      await saveAiGatewayConfig({
+        baseURL: baseUrlInput?.value,
+        apiKey: apiKeyInput?.value,
+        modelName: modelNameInput?.value,
+        language: (languageSelect?.value as any) || "auto",
+      });
 
-        if (!isOpenAIValid || !isElevenLabsValid) {
+      const elevenlabsKey = elevenlabsKeyInput?.value.trim() || "";
+
+      if (pendingUnlock) await pendingUnlock;
+      if (isUnlocked() && elevenlabsKey) {
+        saveBtn.textContent = "Validating Keys...";
+        const isElevenLabsValid = await validateElevenLabsKey(elevenlabsKey);
+
+        if (!isElevenLabsValid) {
           if (status) {
             status.style.color = "red";
-            status.textContent = !isOpenAIValid
-              ? "Invalid OpenAI API key. Please check and try again."
-              : "Invalid ElevenLabs API key. Please check and try again.";
+            status.textContent = "Invalid ElevenLabs API key. Please check and try again.";
             status.classList.add("visible");
             setTimeout(() => status.classList.remove("visible"), 4000);
           }
@@ -427,21 +467,13 @@ document.addEventListener("DOMContentLoaded", async () => {
           return;
         }
 
-        const credentialsToSave: { openai_api_key?: string; elevenlabs_api_key?: string } = {};
-        if (openaiKey) credentialsToSave.openai_api_key = openaiKey;
-        if (elevenlabsKey) credentialsToSave.elevenlabs_api_key = elevenlabsKey;
-        if (Object.keys(credentialsToSave).length > 0) {
-          await saveApiCredentials(credentialsToSave);
-        }
-        credentialsSaved = true;
+        await saveApiCredentials({ elevenlabs_api_key: elevenlabsKey });
       }
 
       // Show success
       if (status) {
-        status.style.color = credentialsSaved ? "" : "var(--accent-color, #22C55E)";
-        status.textContent = credentialsSaved
-          ? "Settings saved successfully!"
-          : "Settings saved. Unlock credential encryption to update API keys.";
+        status.style.color = "var(--accent-color, #22C55E)";
+        status.textContent = "Settings saved successfully!";
         status.classList.add("visible");
 
         setTimeout(() => {

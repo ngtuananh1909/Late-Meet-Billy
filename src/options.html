@@ -217,23 +217,46 @@
             stroke-width="2"
             stroke-linecap="round"
             stroke-linejoin="round"
-            class="lucide lucide-key"
+            class="lucide lucide-cpu"
           >
-            <path d="m15.5 7.5 2.3 2.3a1 1 0 0 0 1.4 0l2.1-2.1a1 1 0 0 0 0-1.4L19 4" />
-            <path d="m21 2-9.6 9.6" />
-            <circle cx="7.5" cy="15.5" r="5.5" />
+            <rect width="16" height="16" x="4" y="4" rx="2" />
+            <rect width="6" height="6" x="9" y="9" rx="1" />
+            <path d="M15 2v2" />
+            <path d="M15 20v2" />
+            <path d="M2 15h2" />
+            <path d="M2 9h2" />
+            <path d="M20 15h2" />
+            <path d="M20 9h2" />
+            <path d="M9 2v2" />
+            <path d="M9 20v2" />
           </svg>
-          API Keys
+          Custom AI Gateway (OpenAI-Compatible BYOK)
         </h2>
 
         <div class="form-group">
-          <label class="form-label">OpenAI API Key <span class="required">*</span></label>
-          <p class="form-hint">Required for AI summarization</p>
+          <label class="form-label" for="ai-base-url">Gateway Base URL</label>
+          <p class="form-hint">
+            Supports OpenAI, OpenRouter, Groq, Ollama, LM Studio (e.g.
+            <code>https://api.openai.com/v1</code>, <code>http://localhost:11434/v1</code>)
+          </p>
+          <input
+            type="text"
+            id="ai-base-url"
+            class="form-input"
+            placeholder="https://api.openai.com/v1"
+          />
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="ai-api-key">API Key</label>
+          <p class="form-hint">
+            Required for cloud gateways; leave empty for local models like Ollama
+          </p>
           <div class="input-row">
-            <input type="password" id="openai-key" class="form-input" placeholder="sk-..." />
+            <input type="password" id="ai-api-key" class="form-input" placeholder="sk-..." />
             <button
               class="toggle-vis"
-              data-target="openai-key"
+              data-target="ai-api-key"
               aria-label="Toggle API key visibility"
               title="Show/Hide Key"
             >
@@ -257,6 +280,101 @@
             </button>
           </div>
         </div>
+
+        <div class="form-group">
+          <label class="form-label" for="ai-model-name">AI Model Name</label>
+          <p class="form-hint">Model identifier used for summarization & Master MoM synthesis</p>
+          <input
+            type="text"
+            id="ai-model-name"
+            list="model-presets"
+            class="form-input"
+            placeholder="gpt-4o-mini"
+          />
+          <datalist id="model-presets">
+            <option value="gpt-4o-mini">GPT-4o Mini (Default Fast)</option>
+            <option value="gpt-4o">GPT-4o (Best Quality)</option>
+            <option value="deepseek-chat">DeepSeek Chat</option>
+            <option value="claude-3-5-sonnet">Claude 3.5 Sonnet</option>
+            <option value="llama3.2">Llama 3.2 (Local Ollama)</option>
+            <option value="gemini-1.5-flash">Gemini 1.5 Flash</option>
+          </datalist>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="ai-language">MoM Output Language</label>
+          <p class="form-hint">Language for Meeting Minutes (MoM) synthesis</p>
+          <select id="ai-language" class="form-select">
+            <option value="auto">Auto-detect (Match meeting language)</option>
+            <option value="vi">Tiếng Việt (Vietnamese)</option>
+            <option value="en">English</option>
+          </select>
+        </div>
+
+        <div
+          class="form-group"
+          style="display: flex; align-items: center; gap: 12px; margin-top: 10px"
+        >
+          <button
+            type="button"
+            id="btn-test-gateway"
+            class="btn-glass"
+            style="
+              padding: 8px 16px;
+              border-radius: 6px;
+              cursor: pointer;
+              display: inline-flex;
+              align-items: center;
+              gap: 6px;
+              font-weight: 500;
+            "
+          >
+            <svg
+              width="14"
+              height="14"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+            >
+              <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path>
+              <polyline points="22 4 12 14.01 9 11.01"></polyline>
+            </svg>
+            Test Connection
+          </button>
+          <span
+            id="gateway-test-status"
+            class="form-hint"
+            style="margin: 0; font-size: 13px"
+          ></span>
+        </div>
+      </section>
+
+      <!-- Optional STT Fallback Section -->
+      <section class="options-section">
+        <h2 class="section-title">
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            class="lucide lucide-mic"
+          >
+            <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
+            <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+            <line x1="12" x2="12" y1="19" y2="22" />
+          </svg>
+          Secondary STT Fallback (Optional)
+        </h2>
+        <p class="form-hint" style="margin-bottom: 12px">
+          Primary transcription uses zero-cost Google Meet DOM captions. This key is only used if
+          captions are not enabled in the room.
+        </p>
 
         <div class="form-group">
           <label class="form-label">ElevenLabs API Key <span class="required">*</span></label>

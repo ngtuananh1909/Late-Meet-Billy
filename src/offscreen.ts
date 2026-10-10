@@ -26,6 +26,14 @@ let vadTimer: ReturnType<typeof setInterval> | null = null;
 let waveformTimer: ReturnType<typeof setInterval> | null = null;
 let audioSources: MediaStreamAudioSourceNode[] = [];
 
+// Continuous Full Meeting Video/Audio Recording
+let fullMeetingStream: MediaStream | null = null;
+let fullMeetingRecorder: MediaRecorder | null = null;
+let fullMeetingChunks: Blob[] = [];
+let fullMeetingBlob: Blob | null = null;
+let fullMeetingUrl: string | null = null;
+let fullMeetingMimeType = "video/webm";
+
 let pendingChunks: Blob[] = [];
 let isStopping = false;
 let isDrainingQueue = false;
@@ -325,17 +333,41 @@ async function cleanupResources() {
     rmsThreshold: rmsThreshold,
   });
 }
-async function getTabAudioStream(streamId: string) {
-  return navigator.mediaDevices.getUserMedia({
-    audio: {
-      // @ts-ignore
-      mandatory: {
-        chromeMediaSource: "tab",
-        chromeMediaSourceId: streamId,
-      },
-    } as any,
-    video: false,
-  });
+async function getTabAudioStream(streamId: string): Promise<MediaStream> {
+  try {
+    return await navigator.mediaDevices.getUserMedia({
+      audio: {
+        // @ts-ignore
+        mandatory: {
+          chromeMediaSource: "tab",
+          chromeMediaSourceId: streamId,
+        },
+      } as any,
+      video: {
+        // @ts-ignore
+        mandatory: {
+          chromeMediaSource: "tab",
+          chromeMediaSourceId: streamId,
+          maxFrameRate: 30,
+        },
+      } as any,
+    });
+  } catch (err) {
+    console.warn(
+      "[LateMeet][offscreen] Tab video capture failed, falling back to audio only:",
+      err,
+    );
+    return await navigator.mediaDevices.getUserMedia({
+      audio: {
+        // @ts-ignore
+        mandatory: {
+          chromeMediaSource: "tab",
+          chromeMediaSourceId: streamId,
+        },
+      } as any,
+      video: false,
+    });
+  }
 }
 
 async function getMicrophoneStream() {
@@ -555,6 +587,50 @@ async function startCapture(
 
   recorderStream = destination.stream;
 
+  // Initialize continuous full meeting recording (Tab Video + Mixed Audio)
+  const videoTracks = mediaStream.getVideoTracks();
+  const mixedAudioTracks = destination.stream.getAudioTracks();
+
+  fullMeetingStream =
+    videoTracks.length > 0
+      ? new MediaStream([videoTracks[0], mixedAudioTracks[0]])
+      : new MediaStream([mixedAudioTracks[0]]);
+
+  const videoCandidateMimeTypes = [
+    "video/webm;codecs=vp9,opus",
+    "video/webm;codecs=vp8,opus",
+    "video/webm",
+    "audio/webm;codecs=opus",
+    "audio/webm",
+  ];
+  fullMeetingMimeType =
+    videoCandidateMimeTypes.find((t) => MediaRecorder.isTypeSupported(t)) ||
+    (videoTracks.length > 0 ? "video/webm" : "audio/webm");
+
+  fullMeetingChunks = [];
+  if (fullMeetingUrl) {
+    URL.revokeObjectURL(fullMeetingUrl);
+    fullMeetingUrl = null;
+  }
+
+  try {
+    fullMeetingRecorder = new MediaRecorder(fullMeetingStream, { mimeType: fullMeetingMimeType });
+  } catch {
+    fullMeetingRecorder = new MediaRecorder(fullMeetingStream);
+    fullMeetingMimeType = fullMeetingRecorder.mimeType || "video/webm";
+  }
+
+  fullMeetingRecorder.ondataavailable = (event: BlobEvent) => {
+    if (event.data && event.data.size > 0) {
+      fullMeetingChunks.push(event.data);
+    }
+  };
+
+  fullMeetingRecorder.start(1000);
+  relay(
+    `full meeting recording started — mime=${fullMeetingMimeType} videoTracks=${videoTracks.length}`,
+  );
+
   recorderMimeType = pickSupportedMimeType();
   mediaRecorder = createRecorder();
 
@@ -648,6 +724,43 @@ async function stopCapture() {
 
     await stopMediaRecorder();
 
+    // Stop and compile continuous full meeting recording
+    if (fullMeetingRecorder && fullMeetingRecorder.state !== "inactive") {
+      await new Promise<void>((resolve) => {
+        if (!fullMeetingRecorder || fullMeetingRecorder.state === "inactive") {
+          resolve();
+          return;
+        }
+        const timer = setTimeout(resolve, 3000);
+        fullMeetingRecorder.addEventListener(
+          "stop",
+          () => {
+            clearTimeout(timer);
+            resolve();
+          },
+          { once: true },
+        );
+        try {
+          fullMeetingRecorder.stop();
+        } catch {
+          clearTimeout(timer);
+          resolve();
+        }
+      });
+    }
+
+    if (fullMeetingChunks.length > 0) {
+      fullMeetingBlob = new Blob(fullMeetingChunks, { type: fullMeetingMimeType });
+      fullMeetingUrl = URL.createObjectURL(fullMeetingBlob);
+      relay(
+        `full meeting recording compiled — ${(fullMeetingBlob.size / (1024 * 1024)).toFixed(2)} MB`,
+      );
+    }
+
+    stopTracks(fullMeetingStream);
+    fullMeetingStream = null;
+    fullMeetingRecorder = null;
+
     await drainPendingChunks();
 
     await cleanupResources();
@@ -666,6 +779,21 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   (async () => {
     if (message.type === "OFFSCREEN_PING") {
       sendResponse({ success: true });
+      return;
+    }
+
+    if (message.type === "OFFSCREEN_GET_VIDEO") {
+      sendResponse({
+        success: true,
+        video:
+          fullMeetingBlob && fullMeetingUrl
+            ? {
+                url: fullMeetingUrl,
+                sizeBytes: fullMeetingBlob.size,
+                mimeType: fullMeetingMimeType,
+              }
+            : null,
+      });
       return;
     }
 
@@ -703,12 +831,23 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       try {
         await stopCapture();
       } finally {
-        await chrome.runtime.sendMessage({
-          type: "OFFSCREEN_CAPTURE_STOPPED",
-        });
+        await chrome.runtime
+          .sendMessage({
+            type: "OFFSCREEN_CAPTURE_STOPPED",
+          })
+          .catch(() => {});
       }
 
-      sendResponse({ success: true });
+      const videoInfo =
+        fullMeetingBlob && fullMeetingUrl
+          ? {
+              url: fullMeetingUrl,
+              sizeBytes: fullMeetingBlob.size,
+              mimeType: fullMeetingMimeType,
+            }
+          : null;
+
+      sendResponse({ success: true, video: videoInfo });
 
       return;
     }

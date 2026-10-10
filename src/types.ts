@@ -15,6 +15,7 @@ export interface TranscriptEntry {
   text: string;
   timestamp: number;
   timestampLabel?: string;
+  isFinal?: boolean;
 }
 
 /** A timestamped event recorded on the meeting timeline. */
@@ -101,6 +102,42 @@ export interface State {
   truncatedCounts?: Record<string, number>;
   tokensUsed?: number;
   estimatedCost?: number;
+  captionSource?: "dom" | "audio_stt" | "none";
+  chunkSummaries?: MeetingChunkSummary[];
+  artifacts?: ExportArtifactsInfo;
+}
+
+/** Configuration for Custom AI Gateway (BYOK + Base URL) */
+export interface AiGatewayConfig {
+  baseURL: string;
+  apiKey: string;
+  modelName: string;
+  language?: "auto" | "vi" | "en";
+}
+
+/** 10-15 minute rolling chunk summary */
+export interface MeetingChunkSummary {
+  chunkIndex: number;
+  startTime: number;
+  endTime: number;
+  timeRangeLabel: string;
+  summary: string;
+  decisions: Decision[];
+  actionItems: ActionItem[];
+  topics: Topic[];
+}
+
+/** Metadata for exported meeting artifacts */
+export interface ExportArtifactsInfo {
+  transcriptFilename?: string;
+  transcriptUrl?: string;
+  recordingFilename?: string;
+  recordingUrl?: string;
+  recordingSizeMb?: number;
+  momFilename?: string;
+  momUrl?: string;
+  momMarkdown?: string;
+  generatedAt?: number;
 }
 
 /** Storage metadata summary for a single saved meeting, used in storage usage reports. */
